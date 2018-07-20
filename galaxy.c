@@ -1,22 +1,33 @@
 #define SDL_MAIN_HANDLED
-#include "SDL2/SDL.h"
-#include "SDL2/SDL_video.h"
-#include "SDL2/SDL_render.h"
-#include "SDL2/SDL_mixer.h"
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_video.h>
+#include <SDL2/SDL_render.h>
+#include <SDL2/SDL_image.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <tgmath.h>
 #include <unistd.h>
+#include "hsv.c"
 
 SDL_Window* window;
 SDL_Renderer* renderer;
 
-const double radius 	= 64;	//ly
-const double twistval 	= 1.0/256*M_PI;	//rad/ly
-const double ab 	= 1.2;	//Major axis / minor axis of stellar orbits
-const double star_num	= 100;	//Probability correlation
-const int screen_size	= 1024;
+// Config
+const double radius    = 64;           // ly
+const double star_num  = 100;          // Probability correlation
+const int screen_size  = 1024;
+
+// Randomised Values
+// =================
+double twistval; // rad/ly
+double tiltval;
+double angle;
+double ab;          // Major axis / minor axis of stellar orbits
+
+rgb star_color; 
+
+// =================
 
 struct Point {
 	double x;
@@ -28,8 +39,17 @@ struct PointPolar {
 	double phi;
 };
 
+static SDL_Texture *tex_star;
+
+// Random float in [-1.0, 1.0]
+double drand() {
+	return rand() / (double)RAND_MAX * 2.0 - 1.0;
+}
+
 void
 init() {
+	srand(getpid());
+
 	//Check SDL Version
 	SDL_version compiled;
 	SDL_version linked;
@@ -41,13 +61,45 @@ init() {
 	}
 
 
-	if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO)) {
+	if(SDL_Init(SDL_INIT_VIDEO)) {
 		fprintf(stderr, "Initialisation Error: %s", SDL_GetError());
 		exit(EXIT_FAILURE);
 	}
+	
+	if(SDL_CreateWindowAndRenderer(screen_size, screen_size, SDL_WINDOW_BORDERLESS, &window, &renderer)) {
+		fprintf(stderr, "Window creation failed: %s", SDL_GetError());
+		exit(EXIT_FAILURE);
+	}
 
-	//Hints
+	if(IMG_Init(IMG_INIT_JPG | IMG_INIT_PNG) == 0) {
+		printf("Failed to load image libraries: %s\n", IMG_GetError());
+	} else {
+		tex_star = IMG_LoadTexture(renderer, "./star.png");
+		if(!tex_star) {
+			printf("Couldn't load star image: %s\n", IMG_GetError());
+		} else {
+			SDL_SetTextureBlendMode(tex_star, SDL_BLENDMODE_ADD);
+			hsv randcolor;
+			randcolor.h = fabs(drand()) * 360.0;
+			randcolor.s = 0.75;
+			randcolor.v = 1;
+			star_color = hsv_to_rgb(randcolor);
+			SDL_SetTextureColorMod(tex_star, star_color.r, star_color.g, star_color.b);
+		}
+	}
+
+	SDL_SetWindowTitle(window, "Galaxy");
+
+	// Settings
+	SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_ADD);
+	// Hints
 	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
+
+	twistval = 1.0/256*M_PI * (1 + drand() * 0.1); //+- 10%
+	ab = 1.2 * (1 + drand() * 0.1);
+	tiltval = fabs(drand());
+	angle = 2*M_PI*fabs(drand());
+
 }
 
 void
@@ -111,30 +163,44 @@ twist(struct PointPolar pin) {
 	return pout;
 }
 
+struct Point tilt(struct Point p, double tiltval) {
+	p.y *= tiltval;
+	return p;
+}
+
+struct Point rotate(struct Point p, double rads) {
+	struct PointPolar pp = cart_to_polar(p);
+	pp.phi += rads;
+	return polar_to_cart(pp);
+}
+
+void draw_star(SDL_Renderer *renderer, int x, int y) {
+	if(tex_star) {
+		SDL_RenderCopy(renderer, tex_star, NULL, &(SDL_Rect){x - 1, y - 1, 3, 3});
+	} else {
+		SDL_RenderDrawPoint(renderer, x, y);
+	}
+	//SDL_RenderFillRect(renderer, &(SDL_Rect){x-1, y-1, 3, 3});
+}
+
 int
 main(int argc, char **argv) {
 	init();
-	srand(getpid());
 
-	if(SDL_CreateWindowAndRenderer(screen_size, screen_size, SDL_WINDOW_BORDERLESS, &window, &renderer)) {
-		fprintf(stderr, "Window creation failed: %s", SDL_GetError());
-		exit(EXIT_FAILURE);
-	}
-	SDL_SetWindowTitle(window, "Galaxy");
 
 	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 	SDL_RenderClear(renderer);
 
 	int star_count = 0;
 
-	SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+	SDL_SetRenderDrawColor(renderer, 255, 255, 255, 1);
 	for(double y = -screen_size/2; y < screen_size/2; y++) {
 		for(double x = -screen_size/2; x < screen_size/2; x++) {
 			double randval = (rand() / (double)RAND_MAX) / star_num;
 			struct PointPolar pp = cart_to_polar((struct Point){x, y});
 			if(pdf(pp) > randval) {
-				struct Point p = polar_to_cart(twist(pp));
-				SDL_RenderDrawPoint(renderer, p.x + screen_size/2, p.y + screen_size/2);
+				struct Point p = rotate(tilt(polar_to_cart(twist(pp)), tiltval), angle);
+				draw_star(renderer, p.x + screen_size/2, p.y + screen_size/2);
 				star_count++;
 			}
 			////Alternative: Set brightness (smooth galaxy), factor is no good
